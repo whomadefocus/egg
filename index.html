@@ -1,0 +1,71 @@
+<!doctype html>
+<html lang="en">
+	<head>
+		<meta charset="utf-8">
+		<meta name="viewport" content="width=device-width, initial-scale=1">
+		<meta name="theme-color" content="#f3f1e8">
+		<title>Signal Desk | News for your attention</title>
+		<link rel="preconnect" href="https://fonts.googleapis.com">
+		<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+		<link href="https://fonts.googleapis.com/css2?family=DM+Mono:wght@400;500&family=DM+Sans:wght@400;500;600;700&family=Newsreader:opsz,wght@6..72,500;6..72,600&display=swap" rel="stylesheet">
+		<link rel="stylesheet" href="styles.css">
+		<script src="app.js" defer></script>
+	</head>
+	<body>
+		<header class="topbar">
+			<a class="wordmark" href="#top" aria-label="Signal Desk home">
+				<span class="brand-mark" aria-hidden="true"><i></i><i></i><i></i></span>
+				<span>signal<span class="wordmark-light">desk</span></span>
+			</a>
+			<div class="edition"><span class="live-dot"></span><span id="edition-date">YOUR DAILY BRIEF</span></div>
+			<button class="refresh-button" id="refresh-interests" type="button" title="Refresh your interest profile" aria-label="Refresh your interest profile">
+				<svg viewBox="0 0 24 24" aria-hidden="true"><path d="M20 7v5h-5M4 17v-5h5M5.5 9a7 7 0 0 1 11.6-2L20 12M4 12l2.9 5a7 7 0 0 0 11.6-2"/></svg>
+				<span>Relearn my feed</span>
+			</button>
+		</header>
+
+		<main id="top" class="layout">
+			<aside class="rail" aria-label="News sources">
+				<div class="rail-heading">
+					<div>
+						<p class="eyebrow">YOUR SIGNAL</p>
+						<h2>Sources</h2>
+					</div>
+					<span class="source-count" id="source-count">0</span>
+				</div>
+				<p class="rail-note">Follow the desks you trust. Your reading shapes the rest.</p>
+				<div class="source-list" id="source-list" aria-live="polite"></div>
+				<div class="rail-foot"><span class="profile-indicator"></span> THIS BROWSER'S READING PROFILE</div>
+			</aside>
+
+			<section class="feed-column" aria-label="News feed">
+				<div class="feed-head">
+					<div class="feed-title-row">
+						<div>
+							<p class="eyebrow">THE WORLD, FILTERED</p>
+							<h1>Your reading desk<span class="title-period">.</span></h1>
+						</div>
+						<div class="story-total"><span id="story-count">0</span><span>STORIES</span></div>
+					</div>
+					<div class="feed-controls">
+						<nav class="tabs" aria-label="Feed view">
+							<button class="tab is-active" type="button" data-view="for-you" aria-pressed="true">For you</button>
+							<button class="tab" type="button" data-view="latest" aria-pressed="false">Latest</button>
+							<button class="tab" type="button" data-view="following" aria-pressed="false">Following</button>
+						</nav>
+						<label class="search-box">
+							<svg viewBox="0 0 24 24" aria-hidden="true"><circle cx="10.8" cy="10.8" r="6.8"/><path d="m16 16 4 4"/></svg>
+							<input id="search" type="search" placeholder="Search the desk" autocomplete="off" aria-label="Search stories">
+							<kbd>/</kbd>
+						</label>
+					</div>
+				</div>
+
+				<div class="feed-status" id="feed-status" role="status" aria-live="polite">Connecting to your desk…</div>
+				<div class="article-list" id="article-list"></div>
+				<footer class="feed-footer"><span class="footer-rule"></span><span>END OF BRIEF</span><span class="footer-rule"></span></footer>
+			</section>
+		</main>
+		<div class="toast" id="toast" role="status" aria-live="polite"></div>
+	</body>
+</html>
