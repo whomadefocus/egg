@@ -387,7 +387,7 @@ document.querySelector("#add-source-form").addEventListener("submit", async (eve
       },
     });
     form.reset();
-    note.textContent = result.duplicate ? "Already in the directory. Now following it." : "Added and followed. The worker will check it shortly.";
+    note.textContent = result.duplicate ? "Already in the directory. Now following it." : "Added and followed. The worker will check it on its next run.";
     await loadFeed({ quiet: true });
   } catch (error) {
     note.textContent = error.message;

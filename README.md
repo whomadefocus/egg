@@ -23,7 +23,7 @@ The workflow installs Python dependencies and downloads/caches `google/embedding
 
 Edit `feeds.json` to add or remove RSS sources. Each entry needs a display `name` and RSS `url`. The worker fetches at most 20 entries per feed per run, extracts page text when available, and falls back to the RSS description when a publisher blocks article fetching.
 
-Readers can also submit RSS/Atom URLs from the Sources panel. New sources are followed for the submitting browser profile and discovered by the worker on its next poll. The UI displays feed-provided cover images when available; images are remote URLs and are not copied to the host.
+Readers can submit direct RSS/Atom URLs or a site's homepage from the Sources panel. New sources are followed for the submitting browser profile and discovered by the worker on its next poll. For homepages, the worker checks HTML alternate-feed links and common `/feed`, `/rss`, and XML feed paths. The UI displays feed-provided cover images when available; images are remote URLs and are not copied to the host.
 
 The Actions worker polls for new sources and embedding jobs for up to 40 minutes per scheduled run, checking every 20 seconds and refreshing feeds every 15 minutes. GitHub-hosted Actions jobs have a hard runtime limit and cannot be permanent daemons. For continuous listening, run `python worker.py` on an always-on machine with the same environment variables; outside Actions, `WORKER_RUN_SECONDS` defaults to `0` (run until stopped).
 

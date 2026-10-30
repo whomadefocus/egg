@@ -94,6 +94,25 @@ class ImageSourceParser(HTMLParser):
             self.image_url = attributes.get("src", "") or attributes.get("data-src", "")
 
 
+class FeedLinkParser(HTMLParser):
+    def __init__(self):
+        super().__init__()
+        self.feed_urls = []
+
+    def handle_starttag(self, tag, attrs):
+        if tag.lower() != "link":
+            return
+        attributes = dict(attrs)
+        relation = attributes.get("rel", "").lower().split()
+        mime_type = attributes.get("type", "").lower().split(";", 1)[0].strip()
+        if "alternate" in relation and mime_type in {
+            "application/rss+xml",
+            "application/atom+xml",
+            "application/rdf+xml",
+        }:
+            self.feed_urls.append(attributes.get("href", ""))
+
+
 def image_from_entry(entry, feed_url):
     for field in ("media_thumbnail", "media_content"):
         for item in entry.get(field, []) or []:
@@ -146,6 +165,39 @@ def fetch_public_url(session, url, timeout):
     raise requests.RequestException("Too many redirects")
 
 
+def parse_feed_response(response):
+    parsed = feedparser.parse(response.content)
+    return parsed if parsed.entries else None
+
+
+def discover_site_feed(session, response, original_url):
+    parser = FeedLinkParser()
+    parser.feed(response.text[:1_000_000])
+    base_url = getattr(response, "url", original_url) or original_url
+    candidates = [urljoin(base_url, candidate) for candidate in parser.feed_urls]
+    origin = urlparse(base_url)
+    site_root = f"{origin.scheme}://{origin.netloc}/"
+    candidates.extend(
+        urljoin(site_root, path)
+        for path in ("feed", "feed/", "rss", "rss.xml", "feed.xml", "atom.xml")
+    )
+
+    seen = {original_url}
+    for candidate in candidates:
+        if candidate in seen:
+            continue
+        seen.add(candidate)
+        try:
+            feed_response = fetch_public_url(session, candidate, timeout=(8, 15))
+            parsed = parse_feed_response(feed_response)
+            if parsed:
+                log.info("Discovered RSS/Atom feed for %s: %s", original_url, feed_response.url)
+                return parsed, getattr(feed_response, "url", candidate)
+        except (requests.RequestException, ValueError):
+            continue
+    return None, ""
+
+
 def extract_article(session, url, fallback):
     try:
         response = fetch_public_url(session, url, timeout=(5, 8))
@@ -172,9 +224,12 @@ def fetch_feed(session, feed, on_progress=None):
     log.info("Fetching RSS feed: %s", source_name)
     try:
         response = fetch_public_url(session, feed_url, timeout=(8, 15))
-        parsed = feedparser.parse(response.content)
-        if parsed.bozo and not parsed.entries:
-            log.warning("Could not parse feed %s: %s", feed_url, parsed.bozo_exception)
+        parsed = parse_feed_response(response)
+        actual_feed_url = getattr(response, "url", feed_url) or feed_url
+        if not parsed:
+            parsed, actual_feed_url = discover_site_feed(session, response, feed_url)
+        if not parsed:
+            log.warning("No RSS or Atom feed discovered at %s", feed_url)
             return []
     except (requests.RequestException, ValueError) as error:
         log.warning("Could not fetch feed %s: %s", feed_url, error)
@@ -182,7 +237,7 @@ def fetch_feed(session, feed, on_progress=None):
 
     candidates = []
     for entry in parsed.entries[:MAX_PER_FEED]:
-        url = entry.get("link", "").strip()
+        url = urljoin(actual_feed_url, entry.get("link", "").strip())
         title = clean_html(entry.get("title", ""))
         if not url or not title or urlparse(url).scheme not in ("http", "https"):
             continue
@@ -198,7 +253,7 @@ def fetch_feed(session, feed, on_progress=None):
                 "url": url,
                 "title": title[:512],
                 "summary": clean_html(entry.get("summary", ""))[:10_000],
-                "cover_image_url": image_from_entry(entry, feed_url),
+                "cover_image_url": image_from_entry(entry, actual_feed_url),
                 "fallback": fallback,
                 "published_at": parse_date(
                     entry.get("published") or entry.get("updated") or entry.get("created")

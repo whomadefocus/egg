@@ -124,11 +124,27 @@ function initialize_schema(PDO $pdo): void
             total INTEGER NOT NULL DEFAULT 0,
             updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
         )",
+        "CREATE TABLE IF NOT EXISTS users (
+            user_id TEXT NOT NULL PRIMARY KEY,
+            email TEXT NOT NULL UNIQUE COLLATE NOCASE,
+            display_name TEXT NOT NULL,
+            password_hash TEXT NOT NULL,
+            created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+        )",
+        "CREATE TABLE IF NOT EXISTS article_feedback (
+            user_id TEXT NOT NULL,
+            article_id INTEGER NOT NULL,
+            value INTEGER NOT NULL CHECK (value IN (-1, 1)),
+            updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+            PRIMARY KEY (user_id, article_id),
+            FOREIGN KEY (article_id) REFERENCES articles(id) ON DELETE CASCADE
+        )",
         'CREATE INDEX IF NOT EXISTS article_published ON articles (published_at)',
         'CREATE INDEX IF NOT EXISTS article_embedding_status ON articles (embedding_status)',
         'CREATE INDEX IF NOT EXISTS read_user_date ON reads (user_id, created_at)',
         'CREATE INDEX IF NOT EXISTS interest_job_status ON interest_jobs (status, id)',
         'CREATE INDEX IF NOT EXISTS interest_job_user ON interest_jobs (user_id, id)',
+        'CREATE INDEX IF NOT EXISTS feedback_article ON article_feedback (article_id, value)',
     ];
     foreach ($statements as $statement) {
         $pdo->exec($statement);
@@ -180,13 +196,62 @@ function require_worker(): void
     }
 }
 
-function valid_user_id($value): string
+function start_user_session(): void
 {
-    $userId = is_string($value) ? $value : '';
-    if (!preg_match('/^[A-Za-z0-9_-]{8,80}$/', $userId)) {
-        respond(['error' => 'A valid user_id is required.'], 400);
+    if (session_status() === PHP_SESSION_ACTIVE) {
+        return;
     }
+    $secure = (!empty($_SERVER['HTTPS']) && $_SERVER['HTTPS'] !== 'off') || ($_SERVER['SERVER_PORT'] ?? '') === '443';
+    session_name('signal_desk_session');
+    session_set_cookie_params([
+        'lifetime' => 0,
+        'path' => '/',
+        'secure' => $secure,
+        'httponly' => true,
+        'samesite' => 'Lax',
+    ]);
+    session_start();
+}
+
+function verify_same_origin(): void
+{
+    $origin = $_SERVER['HTTP_ORIGIN'] ?? '';
+    if ($origin === '') {
+        return;
+    }
+    $scheme = (!empty($_SERVER['HTTPS']) && $_SERVER['HTTPS'] !== 'off') || ($_SERVER['SERVER_PORT'] ?? '') === '443'
+        ? 'https'
+        : 'http';
+    $expected = $scheme . '://' . strtolower((string) ($_SERVER['HTTP_HOST'] ?? ''));
+    if (!hash_equals($expected, rtrim($origin, '/'))) {
+        respond(['error' => 'Cross-origin request rejected.'], 403);
+    }
+}
+
+function require_user(): string
+{
+    $userId = $_SESSION['user_id'] ?? '';
+    if (!is_string($userId) || !preg_match('/^[a-f0-9]{32}$/', $userId)) {
+        respond(['error' => 'Sign in to continue.'], 401);
+    }
+    verify_same_origin();
     return $userId;
+}
+
+function current_user(PDO $pdo): ?array
+{
+    $userId = $_SESSION['user_id'] ?? '';
+    if (!is_string($userId) || $userId === '') {
+        return null;
+    }
+    $stmt = $pdo->prepare('SELECT user_id, email, display_name FROM users WHERE user_id = ?');
+    $stmt->execute([$userId]);
+    return $stmt->fetch() ?: null;
+}
+
+function user_payload(array $user): array
+{
+    return ['id' => $user['user_id'], 'email' => $user['email'], 'display_name' => $user['display_name']];
 }
 
 function text_value($value, int $limit): string
@@ -207,7 +272,7 @@ function queue_interest_job(PDO $pdo, string $userId): ?int
     $parts = [];
     foreach ($stmt->fetchAll() as $row) {
         $excerpt = $row['summary'] ?: $row['content'];
-        $parts[] = text_value($row['source_name'] . ' - ' . $row['title'] . ': ' . $excerpt, 650);
+        $parts[] = text_value('Read: ' . $row['source_name'] . ' - ' . $row['title'] . ': ' . $excerpt, 650);
     }
 
     $stmt = $pdo->prepare(
@@ -216,6 +281,19 @@ function queue_interest_job(PDO $pdo, string $userId): ?int
     $stmt->execute([$userId]);
     foreach ($stmt->fetchAll() as $row) {
         $parts[] = 'Followed source: ' . $row['name'];
+    }
+
+    $stmt = $pdo->prepare(
+        'SELECT a.title, a.summary, a.content, s.name AS source_name, f.value
+         FROM article_feedback f JOIN articles a ON a.id = f.article_id
+         JOIN sources s ON s.id = a.source_id
+         WHERE f.user_id = ? ORDER BY f.updated_at DESC LIMIT 40'
+    );
+    $stmt->execute([$userId]);
+    foreach ($stmt->fetchAll() as $row) {
+        $signal = (int) $row['value'] > 0 ? 'Liked' : 'Disliked';
+        $excerpt = $row['summary'] ?: $row['content'];
+        $parts[] = text_value($signal . ': ' . $row['source_name'] . ' - ' . $row['title'] . ': ' . $excerpt, 650);
     }
 
     $sourceText = text_value(implode("\n", $parts), 18000);
@@ -576,7 +654,7 @@ try {
             if ($sourceName === '' || !filter_var($feedUrl, FILTER_VALIDATE_URL) || !is_array($urlParts)
                 || !in_array(strtolower($urlParts['scheme'] ?? ''), ['http', 'https'], true)
                 || empty($urlParts['host']) || isset($urlParts['user']) || isset($urlParts['pass'])) {
-                respond(['error' => 'Enter a source name and a valid public HTTP(S) RSS URL.'], 400);
+                respond(['error' => 'Enter a source name and a valid public HTTP(S) website or feed URL.'], 400);
             }
             if ((int) $pdo->query('SELECT COUNT(*) FROM sources')->fetchColumn() >= 500) {
                 respond(['error' => 'The source directory is full.'], 429);
