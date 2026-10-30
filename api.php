@@ -38,18 +38,21 @@ function database(): PDO
         return $pdo;
     }
 
-    $dsn = setting('DB_DSN');
-    $username = setting('DB_USERNAME', '');
-    $password = setting('DB_PASSWORD', '');
-    if (!$dsn) {
-        throw new RuntimeException('Database is not configured.');
+    $homeDirectory = getenv('HOME') ?: dirname(__DIR__, 2);
+    $databasePath = (string) setting('DB_PATH', $homeDirectory . '/chat-data/news.sqlite');
+    if ($databasePath !== ':memory:') {
+        $directory = dirname($databasePath);
+        if (!is_dir($directory) && !mkdir($directory, 0700, true) && !is_dir($directory)) {
+            throw new RuntimeException('Could not create the SQLite database directory.');
+        }
     }
 
-    $pdo = new PDO($dsn, $username, $password, [
+    $pdo = new PDO('sqlite:' . $databasePath, null, null, [
         PDO::ATTR_ERRMODE => PDO::ERRMODE_EXCEPTION,
         PDO::ATTR_DEFAULT_FETCH_MODE => PDO::FETCH_ASSOC,
-        PDO::ATTR_EMULATE_PREPARES => false,
     ]);
+    $pdo->exec('PRAGMA foreign_keys = ON');
+    $pdo->exec('PRAGMA busy_timeout = 10000');
     initialize_schema($pdo);
     return $pdo;
 }
@@ -63,59 +66,59 @@ function initialize_schema(PDO $pdo): void
 
     $statements = [
         "CREATE TABLE IF NOT EXISTS sources (
-            id BIGINT UNSIGNED NOT NULL AUTO_INCREMENT PRIMARY KEY,
-            name VARCHAR(255) NOT NULL,
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            name TEXT NOT NULL,
             feed_url TEXT NOT NULL,
-            feed_url_hash CHAR(64) NOT NULL UNIQUE,
-            created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP
-        ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci",
+            feed_url_hash TEXT NOT NULL UNIQUE,
+            created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+        )",
         "CREATE TABLE IF NOT EXISTS articles (
-            id BIGINT UNSIGNED NOT NULL AUTO_INCREMENT PRIMARY KEY,
-            source_id BIGINT UNSIGNED NOT NULL,
-            guid_hash CHAR(64) NOT NULL,
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            source_id INTEGER NOT NULL,
+            guid_hash TEXT NOT NULL,
             url TEXT NOT NULL,
-            title VARCHAR(512) NOT NULL,
+            title TEXT NOT NULL,
             summary TEXT NULL,
-            content MEDIUMTEXT NOT NULL,
-            published_at DATETIME NULL,
-            embedding MEDIUMTEXT NULL,
-            embedding_status VARCHAR(20) NOT NULL DEFAULT 'pending',
-            created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
-            UNIQUE KEY article_guid (source_id, guid_hash),
-            KEY article_published (published_at),
-            KEY article_embedding_status (embedding_status),
-            CONSTRAINT article_source_fk FOREIGN KEY (source_id) REFERENCES sources(id) ON DELETE CASCADE
-        ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci",
+            content TEXT NOT NULL,
+            published_at TEXT NULL,
+            embedding TEXT NULL,
+            embedding_status TEXT NOT NULL DEFAULT 'pending',
+            created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+            UNIQUE (source_id, guid_hash),
+            FOREIGN KEY (source_id) REFERENCES sources(id) ON DELETE CASCADE
+        )",
         "CREATE TABLE IF NOT EXISTS follows (
-            user_id VARCHAR(80) NOT NULL,
-            source_id BIGINT UNSIGNED NOT NULL,
-            created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+            user_id TEXT NOT NULL,
+            source_id INTEGER NOT NULL,
+            created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
             PRIMARY KEY (user_id, source_id),
-            CONSTRAINT follow_source_fk FOREIGN KEY (source_id) REFERENCES sources(id) ON DELETE CASCADE
-        ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci",
+            FOREIGN KEY (source_id) REFERENCES sources(id) ON DELETE CASCADE
+        )",
         "CREATE TABLE IF NOT EXISTS reads (
-            user_id VARCHAR(80) NOT NULL,
-            article_id BIGINT UNSIGNED NOT NULL,
-            created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+            user_id TEXT NOT NULL,
+            article_id INTEGER NOT NULL,
+            created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
             PRIMARY KEY (user_id, article_id),
-            KEY read_user_date (user_id, created_at),
-            CONSTRAINT read_article_fk FOREIGN KEY (article_id) REFERENCES articles(id) ON DELETE CASCADE
-        ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci",
+            FOREIGN KEY (article_id) REFERENCES articles(id) ON DELETE CASCADE
+        )",
         "CREATE TABLE IF NOT EXISTS user_interests (
-            user_id VARCHAR(80) NOT NULL PRIMARY KEY,
-            embedding MEDIUMTEXT NOT NULL,
-            updated_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP
-        ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci",
+            user_id TEXT NOT NULL PRIMARY KEY,
+            embedding TEXT NOT NULL,
+            updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+        )",
         "CREATE TABLE IF NOT EXISTS interest_jobs (
-            id BIGINT UNSIGNED NOT NULL AUTO_INCREMENT PRIMARY KEY,
-            user_id VARCHAR(80) NOT NULL,
-            source_text MEDIUMTEXT NOT NULL,
-            status VARCHAR(20) NOT NULL DEFAULT 'pending',
-            created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
-            claimed_at DATETIME NULL,
-            KEY interest_job_status (status, id),
-            KEY interest_job_user (user_id, id)
-        ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci",
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            user_id TEXT NOT NULL,
+            source_text TEXT NOT NULL,
+            status TEXT NOT NULL DEFAULT 'pending',
+            created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+            claimed_at TEXT NULL
+        )",
+        'CREATE INDEX IF NOT EXISTS article_published ON articles (published_at)',
+        'CREATE INDEX IF NOT EXISTS article_embedding_status ON articles (embedding_status)',
+        'CREATE INDEX IF NOT EXISTS read_user_date ON reads (user_id, created_at)',
+        'CREATE INDEX IF NOT EXISTS interest_job_status ON interest_jobs (status, id)',
+        'CREATE INDEX IF NOT EXISTS interest_job_user ON interest_jobs (user_id, id)',
     ];
     foreach ($statements as $statement) {
         $pdo->exec($statement);
@@ -332,7 +335,7 @@ function ingest_articles(PDO $pdo, array $articles): array
             $feedHash = hash('sha256', $sourceUrl);
             $stmt = $pdo->prepare(
                 'INSERT INTO sources (name, feed_url, feed_url_hash) VALUES (?, ?, ?)
-                 ON DUPLICATE KEY UPDATE name = VALUES(name), feed_url = VALUES(feed_url)'
+                 ON CONFLICT(feed_url_hash) DO UPDATE SET name = excluded.name, feed_url = excluded.feed_url'
             );
             $stmt->execute([$sourceName, $sourceUrl, $feedHash]);
             $stmt = $pdo->prepare('SELECT id FROM sources WHERE feed_url_hash = ?');
@@ -343,12 +346,16 @@ function ingest_articles(PDO $pdo, array $articles): array
             if ($publishedAt === '' || !preg_match('/^\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}$/', $publishedAt)) {
                 $publishedAt = null;
             }
-            $stmt = $pdo->prepare(
+                $stmt = $pdo->prepare(
                 "INSERT INTO articles (source_id, guid_hash, url, title, summary, content, published_at)
                  VALUES (?, ?, ?, ?, ?, ?, ?)
-                 ON DUPLICATE KEY UPDATE url = VALUES(url), title = VALUES(title), summary = VALUES(summary),
-                          content = VALUES(content), published_at = VALUES(published_at), embedding = NULL,
-                    embedding_status = 'pending'"
+                      ON CONFLICT(source_id, guid_hash) DO UPDATE SET
+                          url = excluded.url, title = excluded.title, summary = excluded.summary,
+                          content = excluded.content, published_at = excluded.published_at,
+                          embedding = NULL, embedding_status = 'pending'
+                      WHERE articles.url IS NOT excluded.url OR articles.title IS NOT excluded.title
+                          OR articles.summary IS NOT excluded.summary OR articles.content IS NOT excluded.content
+                          OR articles.published_at IS NOT excluded.published_at"
             );
             $stmt->execute([
                 $sourceId,
@@ -374,10 +381,10 @@ function claim_jobs(PDO $pdo, int $limit): array
     $limit = max(1, min(25, $limit));
     $pdo->beginTransaction();
     try {
-        $pdo->exec("UPDATE articles SET embedding_status = 'pending' WHERE embedding_status = 'processing' AND created_at < (NOW() - INTERVAL 30 MINUTE)");
-        $pdo->exec("UPDATE interest_jobs SET status = 'pending', claimed_at = NULL WHERE status = 'processing' AND claimed_at < (NOW() - INTERVAL 30 MINUTE)");
+        $pdo->exec("UPDATE articles SET embedding_status = 'pending' WHERE embedding_status = 'processing' AND created_at < datetime('now', '-30 minutes')");
+        $pdo->exec("UPDATE interest_jobs SET status = 'pending', claimed_at = NULL WHERE status = 'processing' AND claimed_at < datetime('now', '-30 minutes')");
 
-        $articles = $pdo->query("SELECT id, title, summary, content FROM articles WHERE embedding_status = 'pending' ORDER BY id LIMIT {$limit} FOR UPDATE")->fetchAll();
+        $articles = $pdo->query("SELECT id, title, summary, content FROM articles WHERE embedding_status = 'pending' ORDER BY id LIMIT {$limit}")->fetchAll();
         $articleUpdate = $pdo->prepare("UPDATE articles SET embedding_status = 'processing' WHERE id = ?");
         foreach ($articles as $article) {
             $articleUpdate->execute([$article['id']]);
@@ -386,8 +393,8 @@ function claim_jobs(PDO $pdo, int $limit): array
         $remaining = $limit - count($articles);
         $interests = [];
         if ($remaining > 0) {
-            $interests = $pdo->query("SELECT id, user_id, source_text FROM interest_jobs WHERE status = 'pending' ORDER BY id LIMIT {$remaining} FOR UPDATE")->fetchAll();
-            $interestUpdate = $pdo->prepare("UPDATE interest_jobs SET status = 'processing', claimed_at = NOW() WHERE id = ?");
+            $interests = $pdo->query("SELECT id, user_id, source_text FROM interest_jobs WHERE status = 'pending' ORDER BY id LIMIT {$remaining}")->fetchAll();
+            $interestUpdate = $pdo->prepare("UPDATE interest_jobs SET status = 'processing', claimed_at = CURRENT_TIMESTAMP WHERE id = ?");
             foreach ($interests as $job) {
                 $interestUpdate->execute([$job['id']]);
             }
@@ -437,7 +444,9 @@ function complete_job(PDO $pdo, array $data): array
     $jobId = (int) ($data['job_id'] ?? 0);
     $pdo->beginTransaction();
     try {
-        $stmt = $pdo->prepare('SELECT user_id, status FROM interest_jobs WHERE id = ? FOR UPDATE');
+        $lock = $pdo->prepare('UPDATE interest_jobs SET status = status WHERE id = ?');
+        $lock->execute([$jobId]);
+        $stmt = $pdo->prepare('SELECT user_id, status FROM interest_jobs WHERE id = ?');
         $stmt->execute([$jobId]);
         $job = $stmt->fetch();
         if (!$job || $job['status'] !== 'processing') {
@@ -456,7 +465,7 @@ function complete_job(PDO $pdo, array $data): array
 
         $stmt = $pdo->prepare(
             'INSERT INTO user_interests (user_id, embedding) VALUES (?, ?)
-             ON DUPLICATE KEY UPDATE embedding = VALUES(embedding), updated_at = CURRENT_TIMESTAMP'
+             ON CONFLICT(user_id) DO UPDATE SET embedding = excluded.embedding, updated_at = CURRENT_TIMESTAMP'
         );
         $stmt->execute([$job['user_id'], $encoded]);
         $stmt = $pdo->prepare("UPDATE interest_jobs SET status = 'complete' WHERE id = ?");
@@ -495,7 +504,7 @@ try {
                 respond(['error' => 'A valid source_id is required.'], 400);
             }
             if (!empty($data['following'])) {
-                $stmt = $pdo->prepare('INSERT IGNORE INTO follows (user_id, source_id) VALUES (?, ?)');
+                $stmt = $pdo->prepare('INSERT OR IGNORE INTO follows (user_id, source_id) VALUES (?, ?)');
                 $stmt->execute([$userId, $sourceId]);
             } else {
                 $stmt = $pdo->prepare('DELETE FROM follows WHERE user_id = ? AND source_id = ?');
@@ -510,7 +519,7 @@ try {
             if ($articleId < 1) {
                 respond(['error' => 'A valid article_id is required.'], 400);
             }
-            $stmt = $pdo->prepare('INSERT IGNORE INTO reads (user_id, article_id) VALUES (?, ?)');
+            $stmt = $pdo->prepare('INSERT OR IGNORE INTO reads (user_id, article_id) VALUES (?, ?)');
             $stmt->execute([$userId, $articleId]);
             respond(['saved' => true, 'interest_job_id' => queue_interest_job($pdo, $userId)]);
 
