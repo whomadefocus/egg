@@ -36,10 +36,24 @@ jobs:
       - name: Install worker dependencies
         run: python -m pip install -r requirements.txt
 
+      - name: Verify Hugging Face token is configured
+        env:
+          HF_TOKEN: ${{ secrets.HF_TOKEN }}
+        run: |
+          if [[ -z "$HF_TOKEN" ]]; then
+            echo "::error::HF_TOKEN is empty. Accept access to google/embeddinggemma-300m on Hugging Face and add a read token as the HF_TOKEN repository secret."
+            exit 1
+          fi
+
       - name: Crawl RSS feeds and process embedding jobs
         env:
           NEWS_API_URL: ${{ secrets.NEWS_API_URL }}
           WORKER_TOKEN: ${{ secrets.WORKER_TOKEN }}
           HF_TOKEN: ${{ secrets.HF_TOKEN }}
           EMBEDDING_MODEL: google/embeddinggemma-300m
+          ARTICLE_FETCH_WORKERS: "6"
+          WORKER_RUN_SECONDS: "2400"
+          POLL_INTERVAL_SECONDS: "20"
+          CRAWL_INTERVAL_SECONDS: "900"
+          PYTHONUNBUFFERED: "1"
         run: python worker.py

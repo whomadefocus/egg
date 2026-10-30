@@ -35,6 +35,22 @@
 				</div>
 				<p class="rail-note">Follow the desks you trust. Your reading shapes the rest.</p>
 				<div class="source-list" id="source-list" aria-live="polite"></div>
+				<form class="source-form" id="add-source-form">
+					<p class="eyebrow">ADD A SOURCE</p>
+					<input id="source-name" name="name" type="text" maxlength="255" placeholder="Publication name" required>
+					<input id="source-url" name="feed_url" type="url" maxlength="2048" placeholder="https://site.com/rss.xml" required>
+					<button type="submit"><span aria-hidden="true">+</span> Add feed</button>
+					<p class="form-note" id="source-form-note">Public RSS or Atom feeds</p>
+				</form>
+				<section class="interest-card" aria-label="Your reading interests">
+					<div class="interest-card-head">
+						<span class="interest-orbit" id="interest-orbit" aria-hidden="true"><i></i><i></i><i></i></span>
+						<div><p class="eyebrow">YOUR PROFILE</p><h3>Reading signal</h3></div>
+					</div>
+					<p class="interest-message" id="interest-message">Build your signal by reading stories.</p>
+					<div class="interest-meter"><span id="interest-progress"></span></div>
+					<div class="interest-footer"><span id="reading-count">0 reads · 0 follows</span><span id="interest-updated">NOT TRAINED</span></div>
+				</section>
 				<div class="rail-foot"><span class="profile-indicator"></span> THIS BROWSER'S READING PROFILE</div>
 			</aside>
 
@@ -60,6 +76,12 @@
 						</label>
 					</div>
 				</div>
+
+				<section class="worker-strip" id="worker-strip" data-phase="offline" aria-label="Crawler and embedding progress">
+					<div class="worker-mark" aria-hidden="true"><i></i><i></i><i></i></div>
+					<div class="worker-copy"><p class="eyebrow">LIVE PIPELINE <span id="worker-phase">OFFLINE</span></p><strong id="worker-message">Waiting for the worker</strong></div>
+					<div class="worker-progress"><div class="worker-progress-track"><span id="worker-progress-fill"></span></div><span id="worker-progress-label">NO RECENT ACTIVITY</span></div>
+				</section>
 
 				<div class="feed-status" id="feed-status" role="status" aria-live="polite">Connecting to your desk…</div>
 				<div class="article-list" id="article-list"></div>

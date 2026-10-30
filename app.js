@@ -12,7 +12,7 @@ if (!userId || !/^[A-Za-z0-9_-]{8,80}$/.test(userId)) {
   localStorage.setItem(USER_KEY, userId);
 }
 
-const state = { articles: [], sources: [], view: "for-you", search: "" };
+const state = { articles: [], sources: [], view: "for-you", search: "", loading: false, worker: null };
 const articleList = document.querySelector("#article-list");
 const sourceList = document.querySelector("#source-list");
 const status = document.querySelector("#feed-status");
@@ -87,6 +87,75 @@ function renderSources() {
   }
 }
 
+function renderWorker(worker = {}) {
+  state.worker = worker;
+  const strip = document.querySelector("#worker-strip");
+  const phaseLabel = document.querySelector("#worker-phase");
+  const message = document.querySelector("#worker-message");
+  const fill = document.querySelector("#worker-progress-fill");
+  const label = document.querySelector("#worker-progress-label");
+  let phase = worker.phase || "offline";
+  const updatedAt = safeDate(worker.updated_at);
+  const ageSeconds = updatedAt ? (Date.now() - updatedAt.getTime()) / 1000 : Infinity;
+  if (ageSeconds > 75 && !["error", "stopped"].includes(phase)) phase = "offline";
+
+  const labels = {
+    starting: "STARTING",
+    crawling: "CRAWLING",
+    ingesting: "SAVING POSTS",
+    embedding: "VECTORIZING",
+    waiting: "LISTENING",
+    stopped: "RUN WINDOW ENDED",
+    error: "WORKER ERROR",
+    offline: "OFFLINE",
+  };
+  strip.dataset.phase = phase;
+  phaseLabel.textContent = labels[phase] || phase.toUpperCase();
+  message.textContent = phase === "offline"
+    ? "Waiting for the next worker run"
+    : worker.message || "Worker is checking for updates";
+
+  const completed = Number(worker.completed) || 0;
+  const total = Number(worker.total) || 0;
+  const percent = total ? Math.max(0, Math.min(100, (completed / total) * 100)) : 0;
+  fill.style.width = `${percent}%`;
+  label.textContent = total
+    ? `${completed} / ${total}`
+    : updatedAt && ageSeconds <= 75
+      ? `UPDATED ${relativeDate(worker.updated_at)}`
+      : "NO RECENT ACTIVITY";
+}
+
+function renderInterest(data) {
+  const card = document.querySelector(".interest-card");
+  const message = document.querySelector("#interest-message");
+  const updated = document.querySelector("#interest-updated");
+  const fill = document.querySelector("#interest-progress");
+  const reads = Number(data.read_count) || 0;
+  const follows = Number(data.follow_count) || 0;
+  const status = data.interest_status || "idle";
+  card.dataset.state = status;
+  document.querySelector("#reading-count").textContent = `${reads} read · ${follows} followed`;
+
+  const messages = {
+    idle: reads || follows ? "Waiting for enough signals to shape your feed." : "Read stories or follow sources to build your signal.",
+    pending: "Your latest reading is queued for learning.",
+    processing: "Finding patterns in what you read.",
+    complete: "Your feed is tuned to your reading.",
+    superseded: "Your newest reading is replacing an older update.",
+  };
+  message.textContent = messages[status] || messages.idle;
+  const progress = status === "complete" ? 100 : status === "processing" ? 66 : status === "pending" || status === "superseded" ? 28 : 0;
+  fill.style.width = `${progress}%`;
+  updated.textContent = data.interest_updated_at
+    ? `UPDATED ${relativeDate(data.interest_updated_at)}`
+    : status === "processing"
+      ? "LEARNING"
+      : status === "pending"
+        ? "QUEUED"
+        : "NOT TRAINED";
+}
+
 function storyMatches(article, query) {
   const haystack = `${article.title} ${article.summary || ""} ${article.source_name} ${article.content || ""}`.toLocaleLowerCase();
   return haystack.includes(query);
@@ -156,6 +225,19 @@ function renderArticles() {
       meta.append(tag);
     }
 
+    if (/^https?:\/\//i.test(article.cover_image_url || "")) {
+      const cover = document.createElement("img");
+      cover.className = "article-cover";
+      cover.src = article.cover_image_url;
+      cover.alt = "";
+      cover.loading = "lazy";
+      cover.referrerPolicy = "no-referrer";
+      cover.addEventListener("error", () => cover.remove(), { once: true });
+      body.append(meta, cover);
+    } else {
+      body.append(meta);
+    }
+
     const heading = document.createElement("h2");
     const link = document.createElement("a");
     link.href = article.url;
@@ -181,27 +263,35 @@ function renderArticles() {
     read.setAttribute("aria-pressed", String(article.read));
     read.addEventListener("click", () => markRead(article, !article.read));
     bottom.append(time, read);
-    body.append(meta, heading, description, bottom);
+    body.append(heading, description, bottom);
     card.append(number, body);
     articleList.append(card);
   }
 }
 
-async function loadFeed() {
-  status.textContent = "Connecting to your desk…";
+async function loadFeed({ quiet = false } = {}) {
+  if (state.loading) return;
+  state.loading = true;
+  if (!quiet) status.textContent = "Connecting to your desk…";
   try {
     const data = await request("feed");
     state.articles = Array.isArray(data.articles) ? data.articles : [];
     state.sources = Array.isArray(data.sources) ? data.sources : [];
     renderSources();
     renderArticles();
-    status.textContent = data.interest_updated_at ? "PROFILE UPDATED FROM YOUR READING" : "READ STORIES TO SHAPE YOUR PERSONAL FEED";
+    renderWorker(data.worker);
+    renderInterest(data);
+    if (!quiet) status.textContent = data.interest_updated_at ? "PROFILE UPDATED FROM YOUR READING" : "READ STORIES TO SHAPE YOUR PERSONAL FEED";
   } catch (error) {
-    status.textContent = error.message.includes("Failed to fetch")
-      ? "Could not reach the API. Check the PHP deployment and database settings."
-      : error.message;
-    renderSources();
-    renderArticles();
+    if (!quiet) {
+      status.textContent = error.message.includes("Failed to fetch")
+        ? "Could not reach the API. Check the PHP deployment and database settings."
+        : error.message;
+      renderSources();
+      renderArticles();
+    }
+  } finally {
+    state.loading = false;
   }
 }
 
@@ -281,8 +371,37 @@ document.querySelector("#refresh-interests").addEventListener("click", async (ev
   }
 });
 
+document.querySelector("#add-source-form").addEventListener("submit", async (event) => {
+  event.preventDefault();
+  const form = event.currentTarget;
+  const button = form.querySelector("button[type='submit']");
+  const note = document.querySelector("#source-form-note");
+  button.disabled = true;
+  note.textContent = "Adding source…";
+  try {
+    const result = await request("add_source", {
+      method: "POST",
+      body: {
+        name: form.elements.namedItem("name").value.trim(),
+        feed_url: form.elements.namedItem("feed_url").value.trim(),
+      },
+    });
+    form.reset();
+    note.textContent = result.duplicate ? "Already in the directory. Now following it." : "Added and followed. The worker will check it shortly.";
+    await loadFeed({ quiet: true });
+  } catch (error) {
+    note.textContent = error.message;
+  } finally {
+    button.disabled = false;
+  }
+});
+
 document.querySelector("#edition-date").textContent = new Intl.DateTimeFormat(undefined, {
   weekday: "short", month: "short", day: "numeric",
 }).format(new Date()).toUpperCase();
 
 loadFeed();
+setInterval(() => {
+  renderWorker(state.worker || {});
+  loadFeed({ quiet: true });
+}, 12_000);

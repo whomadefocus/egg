@@ -17,11 +17,15 @@ The workflow runs every three hours and can also be started from the Actions tab
 
 - `NEWS_API_URL`: `https://3rah.ir/chat/api.php`
 - `WORKER_TOKEN`: the shared random token configured in PHP
-- `HF_TOKEN`: optional Hugging Face token if the Gemma model requires accepted gated-model access
+- `HF_TOKEN`: required Hugging Face read token. First accept access to `google/embeddinggemma-300m` on its Hugging Face model page, then create a read token and save it as this repository secret.
 
-The workflow installs Python dependencies and downloads/caches `google/embeddinggemma-300m` on the GitHub Actions runner. Model weights stay in the runner cache rather than being committed to the repository. Review and accept the model terms on Hugging Face if prompted. The embedding uses `sentence-transformers`; vectors are JSON in SQLite, so no vector database is required.
+The workflow installs Python dependencies and downloads/caches `google/embeddinggemma-300m` on the GitHub Actions runner. It checks for `HF_TOKEN` and loads the gated model before crawling, so missing or unauthorized Hugging Face access fails immediately without ingesting stories first. Model weights stay in the runner cache rather than being committed to the repository. The embedding uses `sentence-transformers`; vectors are JSON in SQLite, so no vector database is required.
 
 Edit `feeds.json` to add or remove RSS sources. Each entry needs a display `name` and RSS `url`. The worker fetches at most 20 entries per feed per run, extracts page text when available, and falls back to the RSS description when a publisher blocks article fetching.
+
+Readers can also submit RSS/Atom URLs from the Sources panel. New sources are followed for the submitting browser profile and discovered by the worker on its next poll. The UI displays feed-provided cover images when available; images are remote URLs and are not copied to the host.
+
+The Actions worker polls for new sources and embedding jobs for up to 40 minutes per scheduled run, checking every 20 seconds and refreshing feeds every 15 minutes. GitHub-hosted Actions jobs have a hard runtime limit and cannot be permanent daemons. For continuous listening, run `python worker.py` on an always-on machine with the same environment variables; outside Actions, `WORKER_RUN_SECONDS` defaults to `0` (run until stopped).
 
 ## How interests work
 

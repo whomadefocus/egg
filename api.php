@@ -80,6 +80,7 @@ function initialize_schema(PDO $pdo): void
             title TEXT NOT NULL,
             summary TEXT NULL,
             content TEXT NOT NULL,
+            cover_image_url TEXT NULL,
             published_at TEXT NULL,
             embedding TEXT NULL,
             embedding_status TEXT NOT NULL DEFAULT 'pending',
@@ -115,6 +116,14 @@ function initialize_schema(PDO $pdo): void
             created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
             claimed_at TEXT NULL
         )",
+        "CREATE TABLE IF NOT EXISTS worker_status (
+            id INTEGER PRIMARY KEY CHECK (id = 1),
+            phase TEXT NOT NULL DEFAULT 'offline',
+            message TEXT NOT NULL DEFAULT 'Worker has not checked in yet',
+            completed INTEGER NOT NULL DEFAULT 0,
+            total INTEGER NOT NULL DEFAULT 0,
+            updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+        )",
         'CREATE INDEX IF NOT EXISTS article_published ON articles (published_at)',
         'CREATE INDEX IF NOT EXISTS article_embedding_status ON articles (embedding_status)',
         'CREATE INDEX IF NOT EXISTS read_user_date ON reads (user_id, created_at)',
@@ -124,7 +133,20 @@ function initialize_schema(PDO $pdo): void
     foreach ($statements as $statement) {
         $pdo->exec($statement);
     }
+    ensure_column($pdo, 'articles', 'cover_image_url', 'TEXT NULL');
+    $pdo->exec("INSERT OR IGNORE INTO worker_status (id) VALUES (1)");
     $initialized = true;
+}
+
+function ensure_column(PDO $pdo, string $table, string $column, string $definition): void
+{
+    $columns = $pdo->query('PRAGMA table_info(' . $table . ')')->fetchAll();
+    foreach ($columns as $existing) {
+        if ($existing['name'] === $column) {
+            return;
+        }
+    }
+    $pdo->exec('ALTER TABLE ' . $table . ' ADD COLUMN ' . $column . ' ' . $definition);
 }
 
 function request_data(): array
@@ -258,7 +280,7 @@ function get_feed(PDO $pdo, string $userId): array
     unset($source);
 
     $rows = $pdo->query(
-        'SELECT a.id, a.source_id, a.url, a.title, a.summary, a.published_at, a.created_at,
+        'SELECT a.id, a.source_id, a.url, a.title, a.summary, a.cover_image_url, a.published_at, a.created_at,
                 a.embedding, s.name AS source_name
          FROM articles a JOIN sources s ON s.id = a.source_id
          ORDER BY COALESCE(a.published_at, a.created_at) DESC LIMIT 200'
@@ -290,11 +312,49 @@ function get_feed(PDO $pdo, string $userId): array
         return $b['score'] <=> $a['score'];
     });
 
+    $stmt = $pdo->prepare('SELECT status, created_at FROM interest_jobs WHERE user_id = ? ORDER BY id DESC LIMIT 1');
+    $stmt->execute([$userId]);
+    $interestJob = $stmt->fetch();
+    $stmt = $pdo->prepare('SELECT COUNT(*) FROM reads WHERE user_id = ?');
+    $stmt->execute([$userId]);
+    $readCount = (int) $stmt->fetchColumn();
+    $stmt = $pdo->prepare('SELECT COUNT(*) FROM follows WHERE user_id = ?');
+    $stmt->execute([$userId]);
+    $followCount = (int) $stmt->fetchColumn();
+    $worker = $pdo->query('SELECT phase, message, completed, total, updated_at FROM worker_status WHERE id = 1')->fetch();
+
     return [
         'articles' => $rows,
         'sources' => $sources,
         'interest_updated_at' => $interestRow['updated_at'] ?? null,
+        'interest_status' => $interestJob['status'] ?? ($interestRow ? 'complete' : 'idle'),
+        'interest_job_created_at' => $interestJob['created_at'] ?? null,
+        'read_count' => $readCount,
+        'follow_count' => $followCount,
+        'worker' => $worker ?: ['phase' => 'offline', 'message' => 'Worker has not checked in yet', 'completed' => 0, 'total' => 0, 'updated_at' => null],
     ];
+}
+
+function save_worker_status(PDO $pdo, array $data): array
+{
+    $allowedPhases = ['starting', 'crawling', 'ingesting', 'embedding', 'waiting', 'stopped', 'error'];
+    $phase = text_value($data['phase'] ?? '', 20);
+    if (!in_array($phase, $allowedPhases, true)) {
+        respond(['error' => 'Unknown worker phase.'], 400);
+    }
+    $completed = max(0, min(100000, (int) ($data['completed'] ?? 0)));
+    $total = max(0, min(100000, (int) ($data['total'] ?? 0)));
+    $stmt = $pdo->prepare(
+        'UPDATE worker_status SET phase = ?, message = ?, completed = ?, total = ?, updated_at = CURRENT_TIMESTAMP WHERE id = 1'
+    );
+    $stmt->execute([$phase, text_value($data['message'] ?? '', 180), $completed, $total]);
+    return ['saved' => true];
+}
+
+function list_sources(PDO $pdo): array
+{
+    $sources = $pdo->query('SELECT name, feed_url AS url FROM sources ORDER BY id')->fetchAll();
+    return ['sources' => $sources];
 }
 
 function validate_embedding($value): array
@@ -327,12 +387,19 @@ function ingest_articles(PDO $pdo, array $articles): array
             $sourceUrl = text_value($item['source_url'] ?? '', 2048);
             $sourceName = text_value($item['source_name'] ?? '', 255);
             $url = text_value($item['url'] ?? '', 2048);
+            $coverImageUrl = text_value($item['cover_image_url'] ?? '', 2048);
             $title = text_value($item['title'] ?? '', 512);
             $guid = text_value($item['guid'] ?? $url, 2048);
             if ($sourceUrl === '' || $sourceName === '' || $url === '' || $title === '' || $guid === '') {
                 continue;
             }
 
+            if ($coverImageUrl !== '') {
+                $imageParts = parse_url($coverImageUrl);
+                if (!is_array($imageParts) || !in_array(strtolower($imageParts['scheme'] ?? ''), ['http', 'https'], true)) {
+                    $coverImageUrl = '';
+                }
+            }
             $feedHash = hash('sha256', $sourceUrl);
             $stmt = $pdo->prepare(
                 'INSERT INTO sources (name, feed_url, feed_url_hash) VALUES (?, ?, ?)
@@ -348,14 +415,16 @@ function ingest_articles(PDO $pdo, array $articles): array
                 $publishedAt = null;
             }
                 $stmt = $pdo->prepare(
-                "INSERT INTO articles (source_id, guid_hash, url, title, summary, content, published_at)
-                 VALUES (?, ?, ?, ?, ?, ?, ?)
+                     "INSERT INTO articles (source_id, guid_hash, url, title, summary, content, cover_image_url, published_at)
+                      VALUES (?, ?, ?, ?, ?, ?, ?, ?)
                       ON CONFLICT(source_id, guid_hash) DO UPDATE SET
                           url = excluded.url, title = excluded.title, summary = excluded.summary,
-                          content = excluded.content, published_at = excluded.published_at,
+                          content = excluded.content, cover_image_url = excluded.cover_image_url,
+                          published_at = excluded.published_at,
                         embedding = NULL, embedding_status = 'pending', claimed_at = NULL
                       WHERE articles.url IS NOT excluded.url OR articles.title IS NOT excluded.title
                           OR articles.summary IS NOT excluded.summary OR articles.content IS NOT excluded.content
+                          OR articles.cover_image_url IS NOT excluded.cover_image_url
                           OR articles.published_at IS NOT excluded.published_at"
             );
             $stmt->execute([
@@ -365,6 +434,7 @@ function ingest_articles(PDO $pdo, array $articles): array
                 $title,
                 text_value($item['summary'] ?? '', 10000),
                 text_value($item['content'] ?? '', 50000),
+                $coverImageUrl !== '' ? $coverImageUrl : null,
                 $publishedAt,
             ]);
             $saved++;
@@ -493,11 +563,39 @@ try {
         respond(['error' => 'Unsupported request.'], 405);
     }
 
-    if (in_array($action, ['ingest', 'claim_jobs', 'complete_job'], true)) {
+    if (in_array($action, ['ingest', 'claim_jobs', 'complete_job', 'list_sources', 'worker_status'], true)) {
         require_worker();
     }
 
     switch ($action) {
+        case 'add_source':
+            $userId = valid_user_id($data['user_id'] ?? null);
+            $sourceName = text_value($data['name'] ?? '', 255);
+            $feedUrl = text_value($data['feed_url'] ?? '', 2048);
+            $urlParts = parse_url($feedUrl);
+            if ($sourceName === '' || !filter_var($feedUrl, FILTER_VALIDATE_URL) || !is_array($urlParts)
+                || !in_array(strtolower($urlParts['scheme'] ?? ''), ['http', 'https'], true)
+                || empty($urlParts['host']) || isset($urlParts['user']) || isset($urlParts['pass'])) {
+                respond(['error' => 'Enter a source name and a valid public HTTP(S) RSS URL.'], 400);
+            }
+            if ((int) $pdo->query('SELECT COUNT(*) FROM sources')->fetchColumn() >= 500) {
+                respond(['error' => 'The source directory is full.'], 429);
+            }
+            $feedHash = hash('sha256', $feedUrl);
+            $stmt = $pdo->prepare(
+                'INSERT INTO sources (name, feed_url, feed_url_hash) VALUES (?, ?, ?)
+                 ON CONFLICT(feed_url_hash) DO NOTHING'
+            );
+            $stmt->execute([$sourceName, $feedUrl, $feedHash]);
+            $saved = $stmt->rowCount() === 1;
+            $stmt = $pdo->prepare('SELECT id, name FROM sources WHERE feed_url_hash = ?');
+            $stmt->execute([$feedHash]);
+            $source = $stmt->fetch();
+            $stmt = $pdo->prepare('INSERT OR IGNORE INTO follows (user_id, source_id) VALUES (?, ?)');
+            $stmt->execute([$userId, $source['id']]);
+            $interestJobId = $stmt->rowCount() === 1 ? queue_interest_job($pdo, $userId) : null;
+            respond(['saved' => true, 'duplicate' => !$saved, 'source' => $source, 'following' => true, 'interest_job_id' => $interestJobId]);
+
         case 'follow':
             $userId = valid_user_id($data['user_id'] ?? null);
             $sourceId = (int) ($data['source_id'] ?? 0);
@@ -537,6 +635,12 @@ try {
 
         case 'complete_job':
             respond(complete_job($pdo, $data));
+
+        case 'list_sources':
+            respond(list_sources($pdo));
+
+        case 'worker_status':
+            respond(save_worker_status($pdo, $data));
 
         default:
             respond(['error' => 'Unknown action.'], 404);
