@@ -83,6 +83,7 @@ function initialize_schema(PDO $pdo): void
             published_at TEXT NULL,
             embedding TEXT NULL,
             embedding_status TEXT NOT NULL DEFAULT 'pending',
+            claimed_at TEXT NULL,
             created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
             UNIQUE (source_id, guid_hash),
             FOREIGN KEY (source_id) REFERENCES sources(id) ON DELETE CASCADE
@@ -352,7 +353,7 @@ function ingest_articles(PDO $pdo, array $articles): array
                       ON CONFLICT(source_id, guid_hash) DO UPDATE SET
                           url = excluded.url, title = excluded.title, summary = excluded.summary,
                           content = excluded.content, published_at = excluded.published_at,
-                          embedding = NULL, embedding_status = 'pending'
+                        embedding = NULL, embedding_status = 'pending', claimed_at = NULL
                       WHERE articles.url IS NOT excluded.url OR articles.title IS NOT excluded.title
                           OR articles.summary IS NOT excluded.summary OR articles.content IS NOT excluded.content
                           OR articles.published_at IS NOT excluded.published_at"
@@ -381,11 +382,11 @@ function claim_jobs(PDO $pdo, int $limit): array
     $limit = max(1, min(25, $limit));
     $pdo->beginTransaction();
     try {
-        $pdo->exec("UPDATE articles SET embedding_status = 'pending' WHERE embedding_status = 'processing' AND created_at < datetime('now', '-30 minutes')");
+        $pdo->exec("UPDATE articles SET embedding_status = 'pending', claimed_at = NULL WHERE embedding_status = 'processing' AND claimed_at < datetime('now', '-30 minutes')");
         $pdo->exec("UPDATE interest_jobs SET status = 'pending', claimed_at = NULL WHERE status = 'processing' AND claimed_at < datetime('now', '-30 minutes')");
 
         $articles = $pdo->query("SELECT id, title, summary, content FROM articles WHERE embedding_status = 'pending' ORDER BY id LIMIT {$limit}")->fetchAll();
-        $articleUpdate = $pdo->prepare("UPDATE articles SET embedding_status = 'processing' WHERE id = ?");
+        $articleUpdate = $pdo->prepare("UPDATE articles SET embedding_status = 'processing', claimed_at = CURRENT_TIMESTAMP WHERE id = ?");
         foreach ($articles as $article) {
             $articleUpdate->execute([$article['id']]);
         }
@@ -430,7 +431,7 @@ function complete_job(PDO $pdo, array $data): array
     $encoded = json_encode($vector, JSON_THROW_ON_ERROR);
     if (($data['type'] ?? '') === 'article') {
         $articleId = (int) ($data['article_id'] ?? 0);
-        $stmt = $pdo->prepare("UPDATE articles SET embedding = ?, embedding_status = 'complete' WHERE id = ? AND embedding_status = 'processing'");
+        $stmt = $pdo->prepare("UPDATE articles SET embedding = ?, embedding_status = 'complete', claimed_at = NULL WHERE id = ? AND embedding_status = 'processing'");
         $stmt->execute([$encoded, $articleId]);
         if ($stmt->rowCount() !== 1) {
             respond(['error' => 'Article job was not found or is no longer claimed.'], 409);
